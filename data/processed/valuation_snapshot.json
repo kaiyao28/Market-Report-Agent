@@ -1,0 +1,9 @@
+{
+  "updated": "2026-04-30",
+  "sp500_trailing_pe": 30.68,
+  "sp500_forward_pe": null,
+  "sp500_shiller_cape": 40.53,
+  "nasdaq_forward_pe": null,
+  "market_cap_to_gdp": null,
+  "notes": "trailing_pe + shiller_cape: multpl.com | market_cap_to_gdp: FRED DDDM01USA156NWDB (annual, may lag) | forward_pe: not available from free sources"
+}
