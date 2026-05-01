@@ -1,0 +1,17 @@
+# Generated reports — ignored, keep folder via .gitkeep
+reports/*.pdf
+reports/*.md
+reports/*.html
+
+# Raw data files — large, regenerated daily
+data/processed/*.csv
+data/processed/*.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
