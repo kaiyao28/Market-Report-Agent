@@ -48,6 +48,40 @@ SECTOR_GROUP = {
     "XLB": "Cyclical",  "XLE": "Cyclical",
     "XLP": "Defensive", "XLU": "Defensive", "XLV": "Defensive", "XLRE": "Defensive",
 }
+STOCK_SECTOR_ETF = {
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AVGO": "XLK",
+    "AMD":  "XLK", "ADBE": "XLK", "QCOM": "XLK", "INTC": "XLK",
+    "INTU": "XLK", "AMAT": "XLK", "TXN":  "XLK", "ADI":  "XLK",
+    "LRCX": "XLK", "MU":   "XLK", "KLAC": "XLK", "MRVL": "XLK",
+    "CDNS": "XLK", "SNPS": "XLK", "ASML": "XLK", "NXPI": "XLK",
+    "MCHP": "XLK", "ON":   "XLK", "SMCI": "XLK", "ARM":  "XLK",
+    "PANW": "XLK", "CRWD": "XLK", "WDAY": "XLK", "FTNT": "XLK",
+    "ZS":   "XLK", "SNOW": "XLK", "PLTR": "XLK",
+    "META": "XLC", "GOOGL":"XLC", "GOOG": "XLC", "NFLX": "XLC",
+    "TMUS": "XLC", "WBD":  "XLC", "SIRI": "XLC", "TTWO": "XLC",
+    "TEAM": "XLC", "DDOG": "XLC", "TTD":  "XLC", "APP":  "XLC",
+    "AMZN": "XLY", "TSLA": "XLY", "COST": "XLY", "SBUX": "XLY",
+    "ORLY": "XLY", "ROST": "XLY", "FAST": "XLY", "CPRT": "XLY",
+    "ODFL": "XLY", "PCAR": "XLY", "DASH": "XLY", "MELI": "XLY",
+    "ABNB": "XLY",
+    "PEP":  "XLP", "MDLZ": "XLP", "KHC":  "XLP", "MNST": "XLP",
+    "AMGN": "XLV", "GILD": "XLV", "REGN": "XLV", "VRTX": "XLV",
+    "ISRG": "XLV", "BIIB": "XLV", "IDXX": "XLV", "ILMN": "XLV",
+    "MRNA": "XLV", "DXCM": "XLV",
+    "CSCO": "XLK",
+    "HON":  "XLI", "CTAS": "XLI", "PAYX": "XLI",
+    "FAST": "XLI", "ODFL": "XLI", "CPRT": "XLI", "PCAR": "XLI",
+    "AEP":  "XLU", "EXC":  "XLU", "XEL":  "XLU", "CEG":  "XLU",
+    "PYPL": "XLF", "COIN": "XLF",
+}
+ENTRY_CONFIG = {
+    "rsi_primary_max": 68,
+    "rsi_starter_max": 75,
+    "score_primary":   70,
+    "score_starter":   55,
+    "score_pullback":  40,
+    "score_hold":      25,
+}
 COMM_MAP = {
     "CL=F": "WTI Crude", "BZ=F": "Brent Crude", "GC=F": "Gold",
     "SI=F": "Silver",    "HG=F": "Copper",       "NG=F": "Nat Gas",
@@ -147,6 +181,210 @@ def _dots(filled, total):
     return "●" * filled + "○" * (total - filled)
 
 
+def _news_tickers(news, universe):
+    """Return set of tickers found as whole words in news headlines."""
+    mentioned = set()
+    universe_set = set(universe)
+    for a in news.get("articles", []):
+        normalized = a.get("title", "").upper()
+        for ch in "(),:.-$":
+            normalized = normalized.replace(ch, " ")
+        for word in normalized.split():
+            if word in universe_set:
+                mentioned.add(word)
+    return mentioned
+
+
+def calculate_buy_score(r, market_context, news_tickers_set, sec_score_map):
+    """
+    0-100 buy score: Momentum(25) + Entry Quality(20) + Catalyst(20) + Risk(15) + Regime(20).
+    Returns (score, details_dict).
+    """
+    ticker   = r["ticker"]
+    rsi      = _safe(r.get("rsi14"), 50)
+    ytd      = _safe(r.get("ytd"), 0)
+    ret5d    = _safe(r.get("ret_5d"), 0)
+    pct_rank = _safe(r.get("aqr_pct_rank"), 0.80)
+
+    # Sector
+    sec_etf   = STOCK_SECTOR_ETF.get(ticker)
+    sec_score = sec_score_map.get(sec_etf, 0)
+    sec_s     = +1 if sec_score > 0.001 else (-1 if sec_score < -0.001 else 0)
+    sec_arrow = "↑" if sec_s > 0 else ("↓" if sec_s < 0 else "→")
+    sec_lbl   = SECTOR_SHORT.get(sec_etf, sec_etf or "—")
+
+    # Catalyst
+    has_news = ticker in news_tickers_set
+    has_soft = (not has_news) and sec_s > 0 and ret5d > 0.03
+    cat_label = ("News catalyst" if has_news else "Sector tailwind" if has_soft else "No catalyst")
+
+    # 1. Momentum (0–25): AQR percentile rank within universe
+    if pct_rank >= 0.95:   mom_pts = 25
+    elif pct_rank >= 0.90: mom_pts = 21
+    elif pct_rank >= 0.85: mom_pts = 17
+    elif pct_rank >= 0.80: mom_pts = 12
+    else:                  mom_pts = 6
+
+    # 2. Entry Quality (0–20): RSI sweet spot 52–65
+    if 52 <= rsi <= 65:   entry_pts = 20
+    elif 45 <= rsi < 52:  entry_pts = 14
+    elif 65 < rsi <= 70:  entry_pts = 10
+    elif 70 < rsi <= 75:  entry_pts = 5
+    else:                 entry_pts = 0
+
+    # 3. Catalyst (0–20)
+    cat_pts = 20 if has_news else (10 if has_soft else 0)
+
+    # 4. Risk (0–15): crowding penalty
+    crowd_flags = (1 if rsi > 70 else 0) + (1 if ytd > 0.25 else 0) + (1 if ret5d > 0.10 else 0)
+    if crowd_flags == 0:   risk_pts = 15
+    elif crowd_flags == 1: risk_pts = 8
+    else:                  risk_pts = 2
+    crowd_label = "High ⚠" if crowd_flags >= 2 else ("Moderate ⚠" if crowd_flags == 1 else "Normal")
+
+    # 5. Regime (0–20): market eval score + sector confirm bonus
+    eval_score = market_context.get("eval_score", 0)
+    if eval_score >= 4:    regime_base = 20
+    elif eval_score >= 2:  regime_base = 16
+    elif eval_score >= 0:  regime_base = 10
+    elif eval_score >= -2: regime_base = 5
+    else:                  regime_base = 0
+    regime_pts = min(20, regime_base + (3 if sec_s > 0 else 0))
+
+    total = mom_pts + entry_pts + cat_pts + risk_pts + regime_pts
+    details = {
+        "sec_arrow": sec_arrow, "sec_lbl": sec_lbl,
+        "cat_label": cat_label, "crowd_label": crowd_label,
+        "has_news": has_news, "has_soft": has_soft,
+    }
+    return total, details
+
+
+def classify_candidate(score, rsi, market_context):
+    """
+    5 mutually exclusive tiers. Regime gating: crowded or eval_score ≤ 0 caps at Starter Buy.
+    """
+    is_crowded = market_context.get("is_crowded", False)
+    eval_score = market_context.get("eval_score", 0)
+    cfg = ENTRY_CONFIG
+    regime_cap = is_crowded or eval_score <= 0
+
+    if score >= cfg["score_primary"] and rsi <= cfg["rsi_primary_max"] and not regime_cap:
+        return "Primary Buy"
+    if score >= cfg["score_starter"] and rsi <= cfg["rsi_starter_max"]:
+        return "Starter Buy"
+    if score >= cfg["score_pullback"]:
+        return "Pullback Watch"
+    if score >= cfg["score_hold"]:
+        return "Hold / Don't Chase"
+    return "Avoid"
+
+
+def get_position_size(tier, market_context):
+    """Position sizing label derived from tier, reduced under high correction risk."""
+    corr = market_context.get("correction_prob", 20)
+    reduction = " · 50% size" if corr >= 30 else (" · 70% size" if corr >= 20 else "")
+    if tier == "Primary Buy":
+        return f"Full{reduction}"
+    if tier == "Starter Buy":
+        return f"Starter (50%{'' if corr < 20 else '/reduced'})"
+    if tier == "Pullback Watch":
+        return "Watch Only — not actionable"
+    if tier == "Hold / Don't Chase":
+        return "Hold existing only"
+    return "—"
+
+
+def _stock_verdict(tier, cat_label, sec_arrow, rsi):
+    """Tier-driven verdict — each tier maps to a distinct, non-contradictory outcome."""
+    rsi_str = f"{rsi:.0f}"
+    if tier == "Primary Buy":
+        return ("News-backed momentum — primary entry" if "News" in cat_label
+                else "Strong setup — primary entry, full size")
+    if tier == "Starter Buy":
+        return ("Soft catalyst — starter position, 50% size" if "Sector" in cat_label
+                else "Early momentum — starter only, add on confirmation")
+    if tier == "Pullback Watch":
+        if rsi > 70:
+            return f"RSI {rsi_str} extended — wait for pullback to 55–65"
+        if sec_arrow == "↓":
+            return "Sector weakening — wait for stabilization"
+        return "Not at entry threshold — target RSI 52–65"
+    if tier == "Hold / Don't Chase":
+        return "Hold existing only — no new entries at this level"
+    return "Score too low or regime unfavorable — avoid"
+
+
+def _wl_stock_html(s):
+    tier = s["tier"]
+    tier_col = {
+        "Primary Buy":        GREEN,
+        "Starter Buy":        BLUE,
+        "Pullback Watch":     AMBER,
+        "Hold / Don't Chase": MUTED,
+        "Avoid":              RED,
+    }.get(tier, MUTED)
+    tier_badge = {
+        "Primary Buy":        "BUY",
+        "Starter Buy":        "50%",
+        "Pullback Watch":     "WATCH",
+        "Hold / Don't Chase": "HOLD",
+        "Avoid":              "AVOID",
+    }.get(tier, "—")
+    sec_col  = GREEN if s["sec_arrow"] == "↑" else (RED if s["sec_arrow"] == "↓" else MUTED)
+    size_html = (
+        f'<div style="font-size:9.5px;color:{MUTED};margin-top:1px;">{s["size"]}</div>'
+        if s.get("size") else ""
+    )
+    return (
+        f'<div style="padding:8px 0;border-bottom:1px solid {BG};">'
+        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;">'
+        f'<span style="font-weight:700;color:{tier_col};font-size:13px;">{s["ticker"]}</span>'
+        f'<span style="font-size:9.5px;background:{tier_col}18;color:{tier_col};padding:1px 7px;'
+        f'border-radius:10px;font-weight:700;">{s["buy_score"]} · {tier_badge}</span>'
+        f'</div>'
+        f'<div style="font-size:10px;color:{MUTED};">'
+        f'RSI {s["rsi"]:.0f} · 5D {pct(s["ret5d"])} · YTD {pct(s["ytd"])}'
+        f'</div>'
+        f'<div style="font-size:10px;color:{TEXT};margin-top:2px;">'
+        f'<span style="color:{MUTED};">Cat:</span> {s["cat_lbl"]} '
+        f'<span style="color:{sec_col};margin-left:6px;">{s["sec_arrow"]} {s["sec_lbl"]}</span>'
+        f'</div>'
+        f'<div style="font-size:10.5px;color:{tier_col};margin-top:3px;font-weight:500;">'
+        f'→ {s["verdict"]}'
+        f'</div>'
+        f'{size_html}'
+        f'</div>'
+    )
+
+
+def signal_dual_momentum(spy_ytd):
+    """Antonacci (2014): SPY YTD as absolute momentum proxy. Governs regime exposure."""
+    return "RISK-ON" if (spy_ytd and spy_ytd > 0) else "RISK-OFF"
+
+
+def signal_faber_gtaa(df):
+    """Faber (2007): count of 6 assets above 200MA. Top of hierarchy — governs asset allocation."""
+    tickers = ["SPY", "QQQ", "IWM", "GC=F", "XLE", "XLRE"]
+    sub = df[df["ticker"].isin(tickers)]
+    score = int(sub["above_200ma"].sum()) if "above_200ma" in sub.columns else 0
+    if   score >= 5: regime = "Full Risk-On"
+    elif score >= 3: regime = "Selective"
+    elif score >= 1: regime = "Defensive"
+    else:            regime = "Risk-Off"
+    return score, regime
+
+
+def signal_aqr_momentum(strat_df):
+    """Asness et al. (2012): ytd − ret_20d (skip last month reversal). Governs stock selection."""
+    df = strat_df.copy()
+    df["aqr_score"] = df["ytd"].fillna(0) - df["ret_20d"].fillna(0)
+    thresh = df["aqr_score"].quantile(0.80) if len(df) >= 5 else 0
+    df["aqr_top_quintile"] = df["aqr_score"] >= thresh
+    df["aqr_pct_rank"] = df["aqr_score"].rank(pct=True)
+    return df
+
+
 def _news_score(a):
     t = a.get("title", "").lower()
     score = 0
@@ -177,7 +415,9 @@ def build_html(df, valuation, news):
     sec      = sec.sort_values("sector_score", ascending=False)
     com      = df[df["ticker"].isin(COMMS)].copy()
     strat_df = df[~df["ticker"].isin(EXCLUDE)].copy()
-    strat_df["aqr_score"] = strat_df["ytd"].fillna(0) - strat_df["ret_20d"].fillna(0)
+    strat_df         = signal_aqr_momentum(strat_df)
+    news_tickers_set = _news_tickers(news, strat_df["ticker"].tolist())
+    sec_score_map    = {r["ticker"]: _safe(r.get("sector_score")) for _, r in sec.iterrows()}
 
     # ── core scalars ──────────────────────────────────────────────────────────
     def _idx(t, col):
@@ -209,16 +449,13 @@ def build_html(df, valuation, news):
     copper_5d = _comm_val(com, "HG=F", "ret_5d")
 
     # ── strategy signals ──────────────────────────────────────────────────────
-    dual_signal = "RISK-ON" if spy_ytd and spy_ytd > 0 else "RISK-OFF"
-    dual_color  = GREEN if dual_signal == "RISK-ON" else RED
+    # ── Strategy Hierarchy: Regime (GTAA) → Factor (AQR) → Entry (RSI/score) ──
+    dual_signal  = signal_dual_momentum(spy_ytd)
+    dual_color   = GREEN if dual_signal == "RISK-ON" else RED
 
-    gtaa_tickers  = ["SPY", "QQQ", "IWM", "GC=F", "XLE", "XLRE"]
-    gtaa_df       = df[df["ticker"].isin(gtaa_tickers)].copy()
-    above_200_ct  = int(gtaa_df["above_200ma"].sum()) if "above_200ma" in gtaa_df.columns else 0
-    if above_200_ct >= 5:   gtaa_regime, gtaa_color = "Full Risk-On", GREEN
-    elif above_200_ct >= 3: gtaa_regime, gtaa_color = "Selective", AMBER
-    elif above_200_ct >= 1: gtaa_regime, gtaa_color = "Defensive", AMBER
-    else:                   gtaa_regime, gtaa_color = "Risk-Off", RED
+    above_200_ct, gtaa_regime = signal_faber_gtaa(df)
+    gtaa_color = (GREEN if "Full" in gtaa_regime else
+                  RED   if "Risk-Off" in gtaa_regime else AMBER)
 
     if spy_rsi > 75:
         bias, bias_color = "Extended Bullish", AMBER
@@ -356,12 +593,71 @@ def build_html(df, valuation, news):
     </div>""" for icon, msg, _ in signals)
 
     # ── action lists ──────────────────────────────────────────────────────────
-    watchlist  = strat_df[
-        (strat_df["rsi14"].between(50, 75)) &
+    # Eval proxy for candidate gating (mirrors full eval computed later for display)
+    _n_ob_q   = len(strat_df[strat_df["rsi14"] > 78])
+    _pct_ob_q = _n_ob_q / max(len(strat_df), 1)
+    _max_rsi_q = max((_safe(idx.loc[t, "rsi14"], 50) for t in ["SPY", "QQQ"] if t in idx.index), default=50)
+    _em = (+2 if (above_200_ct >= 5 and dual_signal == "RISK-ON") else
+           +1 if (above_200_ct >= 3 and dual_signal == "RISK-ON") else
+           -2 if dual_signal == "RISK-OFF" else -1)
+    _ev = (-2 if (shiller_cape and shiller_cape > 40) else
+           -1 if (shiller_cape and shiller_cape > 35) else 0)
+    _ec = (-2 if (_max_rsi_q > 80 and _pct_ob_q > 0.15) else
+           -1 if (_max_rsi_q > 75 or _pct_ob_q > 0.10) else
+            0 if _pct_ob_q >= 0.05 else 1)
+    _emac_v = ((1 if vix_val and vix_val < 16 else -1 if vix_val and vix_val > 25 else 0) +
+               (1 if copper_5d > 0.01 else -1 if (gold_5d > 0.02 and oil_5d < 0) else 0))
+    eval_proxy = _em + _ev + _ec + max(-2, min(2, _emac_v))
+    _corr_p = (10 if eval_proxy >= 3 else 20 if eval_proxy >= 0 else 30 if eval_proxy >= -2 else 50)
+
+    market_context = {
+        "eval_score":      eval_proxy,
+        "is_crowded":      "Crowded" in regime_label,
+        "correction_prob": _corr_p,
+    }
+
+    # AQR top quintile + RSI 45–80 pool
+    candidates = strat_df[
+        (strat_df["rsi14"].between(45, 80)) &
         (strat_df["above_50ma"] == True) &
-        (strat_df["ret_5d"] > 0) &
-        (strat_df["aqr_score"] > 0)
-    ].nlargest(5, "aqr_score")
+        (strat_df["aqr_top_quintile"] == True)
+    ].nlargest(20, "aqr_score")
+
+    all_scored: list = []
+    for _, r in candidates.iterrows():
+        buy_score, details = calculate_buy_score(r, market_context, news_tickers_set, sec_score_map)
+        rsi    = _safe(r.get("rsi14"), 50)
+        tier   = classify_candidate(buy_score, rsi, market_context)
+        size   = get_position_size(tier, market_context)
+        verdict = _stock_verdict(tier, details["cat_label"], details["sec_arrow"], rsi)
+        all_scored.append({
+            "ticker": r["ticker"], "rsi": rsi,
+            "ret5d": _safe(r.get("ret_5d")), "ytd": _safe(r.get("ytd")),
+            "buy_score": buy_score, "tier": tier, "size": size,
+            "cat_lbl": details["cat_label"], "crowd_lbl": details["crowd_label"],
+            "sec_arrow": details["sec_arrow"], "sec_lbl": details["sec_lbl"],
+            "has_news": details["has_news"], "verdict": verdict,
+        })
+    all_scored.sort(key=lambda x: -x["buy_score"])
+
+    # Action Entries: Primary Buy + Starter Buy ONLY — no contradictions possible
+    action_candidates = [s for s in all_scored if s["tier"] in ("Primary Buy", "Starter Buy")][:6]
+
+    # Monitor: Pullback Watch + Hold/Don't Chase — labeled non-actionable
+    monitor_scored = [s for s in all_scored if s["tier"] in ("Pullback Watch", "Hold / Don't Chase")][:5]
+    mon_html = ""
+    for s in monitor_scored:
+        mon_col = AMBER if s["tier"] == "Pullback Watch" else MUTED
+        mon_html += (
+            f'<div style="padding:6px 0;border-bottom:1px solid {BG};">'
+            f'<div style="font-weight:700;color:{mon_col};font-size:12.5px;">{s["ticker"]}'
+            f'<span style="font-family:monospace;font-size:10px;color:{MUTED};margin-left:4px;">'
+            f'RSI {s["rsi"]:.0f}</span></div>'
+            f'<div style="font-size:10.5px;color:{MUTED};margin-top:1px;font-style:italic;">{s["verdict"]}</div>'
+            f'</div>'
+        )
+    if not mon_html:
+        mon_html = f'<div style="color:{MUTED};font-size:11px;">No monitor candidates</div>'
 
     avoid_list = strat_df[strat_df["rsi14"] > 78].nlargest(5, "rsi14")
 
@@ -383,7 +679,19 @@ def build_html(df, valuation, news):
             </div>"""
         return html
 
-    wl_html = action_rows(watchlist,  BLUE)
+    if action_candidates:
+        crowded_note = (
+            f'<div style="font-size:9.5px;color:{AMBER};margin-bottom:6px;font-weight:600;">'
+            f'⚠ Crowded regime — starter size only'
+            f'</div>'
+        ) if "Crowded" in regime_label else ""
+        wl_html = crowded_note + "".join(_wl_stock_html(s) for s in action_candidates)
+    else:
+        wl_html = (
+            f'<div style="padding:8px 0;color:{MUTED};font-size:11px;">'
+            f'No actionable entries today →<br>'
+            f'<span style="font-style:italic;">see Monitor list</span></div>'
+        )
     av_html = action_rows(avoid_list, RED)
     bn_html = action_rows(bounce_list, AMBER)
 
@@ -548,6 +856,82 @@ def build_html(df, valuation, news):
             f'<span style="color:{MUTED};font-size:10.5px;"> · {expected}</span></div></div>'
         )
 
+    # ── T+1 Execution Guidance (regime hierarchy → position constraints) ─────
+    primary_count = sum(1 for s in action_candidates if s["tier"] == "Primary Buy")
+    starter_count = sum(1 for s in action_candidates if s["tier"] == "Starter Buy")
+    is_crowded_regime = "Crowded" in regime_label
+
+    # Cross-strategy conflict: momentum strong but defensive rotation active
+    momentum_defensive_conflict = (
+        e_mom_s >= 1 and grp_avg.get("Defensive", 0) > grp_avg.get("Cyclical", 0) + 0.001
+    )
+
+    # Probabilistic sizing: use correction probability from forward scenarios
+    correction_prob = next((p for lbl, p, _, _ in prob_scenarios if "Correction" in lbl), 20)
+    if correction_prob >= 30:
+        size_mult, size_note = 0.5, "50%"
+    elif correction_prob >= 20:
+        size_mult, size_note = 0.7, "70%"
+    else:
+        size_mult, size_note = 1.0, "Full"
+
+    if is_crowded_regime or e_total < -1:
+        t1_entries   = f"{primary_count} primary" + (f" + {starter_count} starter" if starter_count else "")
+        t1_entries   = t1_entries if (primary_count + starter_count) > 0 else "None"
+        t1_size      = f"{size_note} (correction prob {correction_prob}%)"
+        t1_threshold = "Primary Buy: score ≥70, RSI ≤68, no crowding · Starter: score ≥55"
+        t1_avoid_txt = "RSI >75 · no catalyst · Pullback Watch names"
+        t1_col       = RED if (primary_count + starter_count) == 0 else AMBER
+    elif dual_signal == "RISK-ON" and above_200_ct >= 5:
+        t1_entries   = f"Up to {min(primary_count, 3)}"
+        t1_size      = size_note
+        t1_threshold = "Primary Buy preferred · Starter if sector confirms"
+        t1_avoid_txt = "RSI >78 · defensive names while cyclicals lead"
+        t1_col       = GREEN
+    else:
+        t1_entries   = f"1–{min(primary_count, 2)}" if primary_count > 0 else "None"
+        t1_size      = f"{size_note} (conditions suboptimal)"
+        t1_threshold = "Primary Buy only — wait for regime improvement"
+        t1_avoid_txt = "New longs in weakening sectors"
+        t1_col       = AMBER
+
+    # Conflict resolution adjustment
+    if momentum_defensive_conflict:
+        t1_size      = f"{size_note} → reduce 20% (momentum/defensive conflict)"
+        t1_threshold += " · prefer defensive sectors"
+        t1_col       = AMBER
+
+    # Exit rules (always shown — for managing existing positions)
+    exit_trim  = f"RSI >75 · eval score drops ≥2 pts"
+    exit_full  = f"Close below 20MA ({price(spy_ma20)}) · drops from AQR top quintile"
+    exit_reduce = f"Eval score ≤ −2 · defensive rotation >3 sessions"
+
+    # Derive single-sentence focus text (surface output, not rules)
+    if (primary_count + starter_count) == 0 and is_crowded_regime:
+        t1_focus = "No entries — crowded, no catalyst signal yet"
+    elif is_crowded_regime:
+        t1_focus = f"{primary_count + starter_count} name(s) at reduced size · catalyst-backed only"
+    elif dual_signal == "RISK-ON" and above_200_ct >= 5:
+        t1_focus = "Momentum intact — Primary Buy entries at full size, trim RSI>75"
+    else:
+        t1_focus = "Selective conditions — Primary Buy only, avoid Pullback Watch names"
+    if momentum_defensive_conflict:
+        t1_focus += " · ⚠ prefer defensive sectors"
+
+    t1_html = (
+        f'<div style="margin-top:12px;padding:9px 14px;background:{t1_col}06;'
+        f'border-top:2px solid {BG};border-radius:0 0 8px 8px;">'
+        f'<div style="display:flex;gap:16px;align-items:baseline;flex-wrap:wrap;">'
+        f'<span style="font-size:9px;font-weight:700;text-transform:uppercase;'
+        f'letter-spacing:0.7px;color:{MUTED};">T+1</span>'
+        f'<span style="font-size:11.5px;font-weight:700;color:{t1_col};">{t1_entries}</span>'
+        f'<span style="font-size:10.5px;color:{TEXT};">{t1_focus}</span>'
+        f'<span style="margin-left:auto;font-size:10px;color:{MUTED};">'
+        f'Exit: <span style="color:{AMBER};">RSI&gt;75</span>'
+        f' · <span style="color:{RED};">below 20MA ({price(spy_ma20)})</span></span>'
+        f'</div></div>'
+    )
+
     # ── breadth (internal market structure) ──────────────────────────────────
     pct_above_50ma  = _safe(strat_df["above_50ma"].mean())  * 100
     pct_above_200ma = _safe(strat_df["above_200ma"].mean()) * 100
@@ -658,8 +1042,8 @@ def build_html(df, valuation, news):
     ob_idx_tickers = [t for t in ["SPY", "QQQ"] if t in idx.index and _safe(idx.loc[t, "rsi14"], 50) > 80]
     if ob_idx_tickers:
         exec_action_items.append(f"Trim / avoid: {', '.join(ob_idx_tickers)} — RSI at extremes")
-    elif len(watchlist) > 0:
-        exec_action_items.append(f"Watchlist: {', '.join(watchlist['ticker'].head(3).tolist())}")
+    elif action_candidates:
+        exec_action_items.append(f"Watchlist: {', '.join(s['ticker'] for s in action_candidates[:3])}")
     if len(bounce_list) > 0:
         exec_action_items.append(f"Bounce watch: {', '.join(bounce_list['ticker'].head(2).tolist())} (oversold + above 200MA)")
     elif e_total < 0:
@@ -942,21 +1326,29 @@ def build_html(df, valuation, news):
 
 <!-- ACTION LISTS -->
 <div class="card">
-  <div class="card-title">Action Lists — AQR Momentum Framework</div>
+  <div class="card-title">Momentum Signals — Risk-Adjusted</div>
   <div class="grid-3">
     <div>
-      <div class="action-title" style="color:{BLUE};border-color:{BLUE}30;">● Momentum Watchlist</div>
+      <div class="action-title" style="color:{BLUE};border-color:{BLUE}30;">● Action Entries</div>
       {wl_html}
+    </div>
+    <div>
+      <div class="action-title" style="color:{MUTED};border-color:{MUTED}30;">◎ Monitor — Not Actionable</div>
+      {mon_html}
     </div>
     <div>
       <div class="action-title" style="color:{RED};border-color:{RED}30;">● Avoid / Overbought</div>
       {av_html}
-    </div>
-    <div>
-      <div class="action-title" style="color:{AMBER};border-color:{AMBER}50;">● RSI-2 Bounce Watch</div>
-      {bn_html}
+      <div style="margin-top:10px;">
+        <div style="font-size:10px;font-weight:700;color:{AMBER};text-transform:uppercase;
+                    letter-spacing:0.6px;border-bottom:2px solid {AMBER}30;padding-bottom:5px;margin-bottom:7px;">
+          ● RSI-2 Bounce Watch
+        </div>
+        {bn_html}
+      </div>
     </div>
   </div>
+  {t1_html}
 </div>
 
 <!-- YTD SNAPSHOT -->
